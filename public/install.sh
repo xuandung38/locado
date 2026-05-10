@@ -112,7 +112,6 @@ info "Downloading $FILENAME..."
 
 # Create temp directory
 TMPDIR=$(mktemp -d)
-trap "rm -rf $TMPDIR" EXIT
 
 # Download and extract
 if ! curl -sL "$URL" -o "$TMPDIR/$FILENAME"; then
