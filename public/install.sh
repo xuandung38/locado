@@ -8,7 +8,7 @@
 # This script will:
 # 1. Download and install the latest locado binary
 # 2. Install dnsmasq for wildcard DNS resolution
-# 3. Configure dnsmasq for *.local domains
+# 3. Configure dnsmasq for *.test domains (.local conflicts with mDNS/Bonjour)
 # 4. Install and start locado as a system service
 #
 
@@ -216,7 +216,7 @@ install_dnsmasq_darwin() {
     brew install dnsmasq
   fi
 
-  # Configure dnsmasq for *.local
+  # Configure dnsmasq for *.test
   DNSMASQ_CONF="/opt/homebrew/etc/dnsmasq.conf"
   if [ ! -f "$DNSMASQ_CONF" ]; then
     DNSMASQ_CONF="/usr/local/etc/dnsmasq.conf"
@@ -227,9 +227,9 @@ install_dnsmasq_darwin() {
   sudo mkdir -p "$DNSMASQ_D_DIR"
 
   # Add locado config
-  if [ ! -f "$DNSMASQ_D_DIR/locado.conf" ]; then
-    info "Configuring dnsmasq for *.local domains..."
-    echo "address=/local/127.0.0.1" | sudo tee "$DNSMASQ_D_DIR/locado.conf" > /dev/null
+  if ! grep -q "address=/test/" "$DNSMASQ_D_DIR/locado.conf" 2>/dev/null; then
+    info "Configuring dnsmasq for *.test domains..."
+    echo "address=/test/127.0.0.1" | sudo tee "$DNSMASQ_D_DIR/locado.conf" > /dev/null
 
     # Ensure main config includes dnsmasq.d
     if ! grep -q "conf-dir=$DNSMASQ_D_DIR" "$DNSMASQ_CONF" 2>/dev/null; then
@@ -242,17 +242,47 @@ install_dnsmasq_darwin() {
   # Create resolver directory for macOS
   sudo mkdir -p /etc/resolver
 
-  # Add resolver for .local domain
-  if [ ! -f "/etc/resolver/local" ]; then
-    info "Creating DNS resolver for .local..."
-    echo "nameserver 127.0.0.1" | sudo tee /etc/resolver/local > /dev/null
+  # Add resolver for .test domain
+  if [ ! -f "/etc/resolver/test" ]; then
+    info "Creating DNS resolver for .test..."
+    echo "nameserver 127.0.0.1" | sudo tee /etc/resolver/test > /dev/null
   else
-    info "DNS resolver for .local already exists"
+    info "DNS resolver for .test already exists"
   fi
 
   # Start/restart dnsmasq
   info "Starting dnsmasq service..."
   sudo brew services restart dnsmasq 2>/dev/null || sudo brew services start dnsmasq
+}
+
+# Remove .local DNS config from older Locado installers (.local hijacks mDNS/Bonjour)
+cleanup_legacy_local_dns() {
+  if [ "$OS" = "darwin" ]; then
+    for dir in /opt/homebrew/etc/dnsmasq.d /usr/local/etc/dnsmasq.d; do
+      if grep -q "address=/local/" "$dir/locado.conf" 2>/dev/null; then
+        info "Removing legacy *.local dnsmasq config..."
+        echo "address=/test/127.0.0.1" | sudo tee "$dir/locado.conf" > /dev/null
+        sudo brew services restart dnsmasq 2>/dev/null || true
+      fi
+    done
+    # Only remove the resolver if it is the one Locado created (plain 127.0.0.1)
+    if [ -f /etc/resolver/local ] && [ "$(cat /etc/resolver/local 2>/dev/null)" = "nameserver 127.0.0.1" ]; then
+      info "Removing legacy .local resolver (restores mDNS/Bonjour)..."
+      sudo rm -f /etc/resolver/local
+      sudo dscacheutil -flushcache 2>/dev/null || true
+      sudo killall -HUP mDNSResponder 2>/dev/null || true
+    fi
+  else
+    if grep -q "address=/local/" /etc/dnsmasq.d/locado.conf 2>/dev/null; then
+      info "Removing legacy *.local dnsmasq config..."
+      echo "address=/test/127.0.0.1" | sudo tee /etc/dnsmasq.d/locado.conf > /dev/null
+      sudo systemctl restart dnsmasq 2>/dev/null || true
+    fi
+    if grep -q "Domains=~local" /etc/systemd/resolved.conf.d/locado.conf 2>/dev/null; then
+      sudo sed -i 's/Domains=~local/Domains=~test/' /etc/systemd/resolved.conf.d/locado.conf
+      sudo systemctl restart systemd-resolved 2>/dev/null || true
+    fi
+  fi
 }
 
 install_dnsmasq_linux() {
@@ -293,9 +323,9 @@ install_dnsmasq_linux() {
   DNSMASQ_D_DIR="/etc/dnsmasq.d"
   sudo mkdir -p "$DNSMASQ_D_DIR"
 
-  if [ ! -f "$DNSMASQ_D_DIR/locado.conf" ]; then
-    info "Configuring dnsmasq for *.local domains..."
-    echo "address=/local/127.0.0.1" | sudo tee "$DNSMASQ_D_DIR/locado.conf" > /dev/null
+  if ! grep -q "address=/test/" "$DNSMASQ_D_DIR/locado.conf" 2>/dev/null; then
+    info "Configuring dnsmasq for *.test domains..."
+    echo "address=/test/127.0.0.1" | sudo tee "$DNSMASQ_D_DIR/locado.conf" > /dev/null
   else
     info "dnsmasq locado config already exists"
   fi
@@ -312,7 +342,7 @@ install_dnsmasq_linux() {
       cat << EOF | sudo tee "$RESOLVED_CONF" > /dev/null
 [Resolve]
 DNS=127.0.0.1
-Domains=~local
+Domains=~test
 EOF
       sudo systemctl restart systemd-resolved
     fi
@@ -323,6 +353,9 @@ EOF
   sudo systemctl enable dnsmasq 2>/dev/null || true
   sudo systemctl restart dnsmasq
 }
+
+# Legacy .local cleanup runs in BOTH modes — upgraders carry the old config too
+cleanup_legacy_local_dns
 
 # Only run dnsmasq setup on fresh install
 if [ "$UPGRADE_MODE" = false ]; then
@@ -384,10 +417,10 @@ fi
 
 # Test DNS resolution
 if [ "$OS" == "darwin" ]; then
-  if ping -c 1 -W 1 test.local > /dev/null 2>&1; then
-    info "DNS resolution working! (test.local -> 127.0.0.1)"
+  if ping -c 1 -W 1 locado.test > /dev/null 2>&1; then
+    info "DNS resolution working! (locado.test -> 127.0.0.1)"
   else
-    warn "DNS may need a moment to propagate. Try: ping test.local"
+    warn "DNS may need a moment to propagate. Try: ping locado.test"
   fi
 fi
 
@@ -421,8 +454,8 @@ else
     echo ""
     echo "  Quick Start:"
     echo "    1. Open dashboard at http://localhost:2280"
-    echo "    2. Add a domain (e.g., myapp.local -> localhost:3000)"
-    echo "    3. Access https://myapp.local in your browser"
+    echo "    2. Add a domain (e.g., myapp.test -> localhost:3000)"
+    echo "    3. Access https://myapp.test in your browser"
 fi
 echo ""
 echo "  Service Commands:"
